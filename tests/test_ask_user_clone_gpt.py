@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import subprocess
@@ -57,7 +58,20 @@ class FakeOpener:
         result = self.results.pop(0)
         if isinstance(result, BaseException):
             raise result
+        if isinstance(result, FakeResponse):
+            return result
         return FakeResponse(result)
+
+
+class BrokenBody(FakeResponse):
+    """The connection succeeds but reading the body fails."""
+
+    def __init__(self, exc):
+        super().__init__(b"")
+        self._exc = exc
+
+    def read(self):
+        raise self._exc
 
 
 def make_client(mod, *results):
@@ -134,6 +148,18 @@ def test_project_root_does_not_escape_to_parent_env(clone_mod, tmp_path):
     script.parent.mkdir(parents=True)
     script.write_text("")
     assert clone_mod.find_project_root(script) == project
+
+
+def test_project_root_fallback_for_relocated_install(clone_mod, tmp_path):
+    """Outside a project (no .agents/.git above), the root is the fixed
+    <root>/.agents/skills/<skill>/scripts layout offset; no upward .env search."""
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=parent-secret\n")
+    script = tmp_path / "home" / "skills" / "user-clone-gpt" / "scripts" / "x.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    if any((p / ".agents").is_dir() or (p / ".git").exists() for p in script.parents):
+        pytest.skip("tmp dir is inside a project")
+    assert clone_mod.find_project_root(script) == script.parents[4]
 
 
 def test_env_path_honours_override(clone_mod, monkeypatch, tmp_path):
@@ -279,6 +305,25 @@ def test_client_network_error_on_post_is_not_retried(clone_mod):
     assert sleeps == []
 
 
+@pytest.mark.parametrize(
+    "exc",
+    [ConnectionResetError("reset by peer"), http.client.IncompleteRead(b"par")],
+    ids=["reset", "incomplete-read"],
+)
+def test_client_body_read_errors_become_openai_error(clone_mod, exc):
+    """Regression: errors while reading the body used to escape as tracebacks."""
+    client, _, sleeps = make_client(clone_mod, BrokenBody(exc))
+    with pytest.raises(clone_mod.OpenAIError, match="Network error"):
+        client.request("POST", "/responses", {})
+    assert sleeps == []
+
+
+def test_client_retries_body_read_errors_for_get(clone_mod):
+    client, _, sleeps = make_client(clone_mod, BrokenBody(ConnectionResetError()), {"ok": 1})
+    assert client.request("GET", "/responses/resp_1") == {"ok": 1}
+    assert sleeps == [1.0]
+
+
 def test_client_truncates_and_summarizes_error_body(clone_mod):
     big = b"x" * 5000
     client, _, _ = make_client(clone_mod, http_error(400, big))
@@ -397,6 +442,18 @@ def test_cancel_failure_is_only_a_warning(clone_mod, capsys):
     client, _, _ = make_client(clone_mod, http_error(404, b'{"error":{"message":"gone"}}'))
     clone_mod.cancel_response(client, "resp_1")
     assert "could not cancel" in capsys.readouterr().err
+
+
+def test_ask_cancels_when_polling_fails(clone_mod):
+    """A permanent polling failure must not leave the background run going."""
+    errors = [http_error(500) for _ in range(clone_mod.MAX_RETRIES + 1)]
+    client, opener, _ = make_client(
+        clone_mod, {"id": "resp_9", "status": "queued"}, *errors, {"id": "resp_9", "status": "cancelled"}
+    )
+    with pytest.raises(clone_mod.OpenAIError, match="500"):
+        clone_mod.ask(client, make_config(clone_mod), "prompt", sleep=lambda s: None)
+    last = opener.requests[-1]
+    assert last["method"] == "POST" and last["url"].endswith("/responses/resp_9/cancel")
 
 
 def test_ask_end_to_end(clone_mod):

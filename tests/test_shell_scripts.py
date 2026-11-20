@@ -309,3 +309,82 @@ def test_batch_main_requires_tools(tmp_path):
     r = bash(str(BATCH), env=env)
     assert r.returncode != 0
     assert "Required tool not found on PATH: notebooklm" in r.stderr
+
+
+# ------------------------------------------------- run_one_deck failures
+
+NB = "11111111-1111-1111-1111-111111111111"
+SRC = "22222222-2222-2222-2222-222222222222"
+ART = "33333333-3333-3333-3333-333333333333"
+
+
+@pytest.fixture
+def deck_env(tmp_path):
+    """Stub notebooklm and the post-processing scripts; FAIL_STEP selects a failure."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    nb = bin_dir / "notebooklm"
+    nb.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            step="$1 ${{2:-}}"
+            case "$step" in
+              "source add") [ "${{FAIL_STEP:-}}" = add ] && exit 3
+                            echo '{{"source": {{"id": "{SRC}"}}}}' ;;
+              "source wait") [ "${{FAIL_STEP:-}}" = wait ] && exit 3; true ;;
+              "generate slide-deck") echo "Started artifact {ART} for notebook {NB}" ;;
+              "download slide-deck") [ "${{FAIL_STEP:-}}" = download ] && exit 3
+                                     printf '%%PDF-1.4' > "$3" ;;
+              *) exit 9 ;;
+            esac
+            """
+        )
+    )
+    nb.chmod(0o755)
+
+    skill = tmp_path / "skill"
+    (skill / "scripts").mkdir(parents=True)
+    shutil.copy(SCRIPTS / "render_prompt.py", skill / "scripts" / "render_prompt.py")
+    shutil.copy(PITCH_SKILL / "deck-prompt-template.md", skill / "deck-prompt-template.md")
+    for name, step in (("remove_watermark.sh", "watermark"), ("flatten_pdf_for_canva.sh", "flatten")):
+        (skill / "scripts" / name).write_text(
+            f'[ "${{FAIL_STEP:-}}" = {step} ] && exit 4\n'
+            f'[ "${{FAIL_STEP:-}}" = {step}-empty ] && {{ : > "$2"; exit 0; }}\n'
+            'cp "$1" "$2"\n'
+        )
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "acme_user_clone_gpt_deck_layout.md").write_text("## Slide 1: Hi\n")
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "OUTPUT_DIR": str(out),
+        "WORK_ROOT": str(tmp_path / "work"),
+    }
+    prelude = f'SKILL_DIR="{skill}"; NB_ID="{NB}"\n'
+    return env, prelude, out
+
+
+def run_deck(deck_env, fail_step=""):
+    env, prelude, out = deck_env
+    env = {**env, "FAIL_STEP": fail_step}
+    snippet = prelude + 'if pdf=$(run_one_deck Acme ""); then echo "OK:$pdf"; else echo FAILED; fi'
+    return source_batch(snippet, env=env), out
+
+
+def test_run_one_deck_success(deck_env):
+    r, out = run_deck(deck_env)
+    assert r.stdout.strip() == f"OK:{out / 'acme_pitch_cleaned.pdf'}", r.stderr
+    assert (out / "acme_pitch_canva_flat.pdf").is_file()
+    assert f"Using artifact ID {ART}" in r.stderr
+
+
+@pytest.mark.parametrize(
+    "step", ["add", "wait", "download", "watermark", "watermark-empty", "flatten", "flatten-empty"]
+)
+def test_run_one_deck_reports_failure_of_each_step(deck_env, step):
+    """Regression: inside `if pdf=$(run_one_deck ...)` errexit is ignored, so a
+    failing step used to be recorded as a success."""
+    r, _ = run_deck(deck_env, step)
+    assert r.stdout.strip() == "FAILED", r.stderr

@@ -30,7 +30,7 @@ OPENAI_VECTOR_STORE_IDS=vs_...                   # knowledge base for file_searc
 # OPENAI_MODEL=gpt-5.5                           # optional; default gpt-5.5
 ```
 
-At least one of `OPENAI_INSTRUCTIONS_FILE`, `OPENAI_VECTOR_STORE_IDS`, `OPENAI_PROMPT_ID` is required. Check the configuration (no API call, never prints the key):
+At least one of `OPENAI_INSTRUCTIONS_FILE`, `OPENAI_VECTOR_STORE_IDS`, `OPENAI_PROMPT_ID` is required, and `OPENAI_API_KEY` is required for every mode (including `--info`). The project root is the nearest directory above the script containing `.agents` or `.git`; if the skill is installed elsewhere, set `OPENAI_ENV_FILE=/path/to/.env`. Requests use background mode with `store: true`, so OpenAI keeps prompts and responses under your account's retention settings. Check the configuration (no API call, never prints the key):
 
 ```bash
 SKILL_DIR="<absolute path to .agents/skills/user-clone-gpt>"

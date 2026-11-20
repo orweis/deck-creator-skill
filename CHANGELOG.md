@@ -27,6 +27,16 @@ All notable changes to this project are documented here. The format follows
     configuration and prints the model. `--skip-model-check` is a no-op. The
     automatic "update the assistant's model with fallbacks" behaviour is gone,
     since there is no assistant object to update.
+  - Every mode, including `--info` and `--ensure-model-only`, now fails
+    (exit 2) unless `OPENAI_API_KEY` **and** a voice configuration are set.
+    `--ensure-model-only` therefore succeeds or fails on local configuration
+    alone; `run_batch_decks.sh` uses it as its fail-fast check.
+  - `.env` discovery changed: the script uses `<project root>/.env`, where the
+    project root is the first directory above the script that contains
+    `.agents` or `.git`. 1.x walked upward for *any* `.env`. If you installed
+    the skill somewhere else (for example copied it to `~/.claude/skills/`),
+    the old upward search no longer finds your `.env`: set
+    `OPENAI_ENV_FILE=/path/to/.env` (or export the variables directly).
 - **`render_prompt.py`** now rejects an empty `--company` or an empty deck
   layout (exit 2) instead of rendering a useless prompt.
 - **`run_batch_decks.sh`** keeps working files (prompts, pitch files, logos)
@@ -49,6 +59,13 @@ All notable changes to this project are documented here. The format follows
    to check the configuration.
 5. Replace `--thread-id thread_...` in your notes or scripts with
    `--previous-response-id resp_...` (the ID printed after each run).
+6. If the skill lives outside a project directory (no `.agents` or `.git`
+   above it), set `OPENAI_ENV_FILE` to your `.env`.
+7. Existing `setup.sh` installs: rerun `setup.sh`. If your watermark-remover
+   checkout (`~/.local/share/notebooklm-watermark-remover` by default) has
+   local edits, setup now stops instead of discarding them with
+   `git reset --hard`; commit/stash them or delete the checkout first. The
+   checkout is moved from the tip of branch `bibi` to the pinned commit.
 
 ### Security
 
@@ -90,6 +107,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- `run_batch_decks.sh`: a failing step inside a company's run (source upload
+  or wait, download, watermark removal, Canva flattening, User-Clone-GPT) no
+  longer counts as success. Because `run_one_deck` runs inside
+  `if pdf=$(...)`, bash ignored `set -e` there, so 1.x recorded such failures
+  as a success with a missing PDF. Each step is now checked explicitly and
+  every output PDF must exist and be non-empty. The artifact ID scraped from
+  `notebooklm generate` output is logged.
+- `ask_user_clone_gpt.py`: connection resets and truncated bodies while
+  reading a response are reported as clean network errors (and retried for
+  GET) instead of a traceback; a background response is cancelled when
+  polling fails permanently, not only on timeout.
 - `run_batch_decks.sh`: a cached layout no longer leaves the pitch file
   missing; stdout of the download/clean/flatten steps no longer leaks into the
   returned PDF path; empty `SHARED_SRC_IDS` no longer aborts on bash 3.2

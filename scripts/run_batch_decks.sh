@@ -72,6 +72,14 @@ load_companies_file() {
   done < "$file"
 }
 
+# Fail (non-zero) unless $2 exists and is non-empty.
+require_nonempty_file() {
+  if [ ! -s "$2" ]; then
+    echo "[$1] ERROR: expected output missing or empty: $2" >&2
+    return 1
+  fi
+}
+
 require_tools() {
   local tool missing=0
   for tool in "$@"; do
@@ -130,14 +138,14 @@ EOF
     python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" \
       --prompt-file "$prompt_path" \
       -o "$layout_out" \
-      --timeout 600 >&2
+      --timeout 600 >&2 || { echo "[$company] User-Clone-GPT failed" >&2; return 1; }
   fi
 
   # Always (re)build the pitch file so a cached layout still yields a source.
   {
     printf '# %s — buyer pitch description\n\n' "$company"
     cat "$layout_out"
-  } > "$pitch_path"
+  } > "$pitch_path" || return 1
 
   echo "$pitch_path"
 }
@@ -158,6 +166,9 @@ find_logo() {
   echo ""
 }
 
+# NOTE: callers use `if pdf=$(run_one_deck ...)`, which disables errexit for
+# everything inside this function (and the functions it calls). Every step that
+# can fail therefore needs an explicit `|| return 1`.
 run_one_deck() {
   local company="$1"
   local extra_context="$2"
@@ -176,18 +187,34 @@ run_one_deck() {
   rm -f "$pdf_raw" "$pdf_clean" "$pdf_flat"
 
   local pitch_path
-  pitch_path=$(generate_user_clone_gpt_layout "$company" "$extra_context")
+  pitch_path=$(generate_user_clone_gpt_layout "$company" "$extra_context") || return 1
+  if [ ! -s "$pitch_path" ]; then
+    echo "[$company] ERROR: pitch description missing: $pitch_path" >&2
+    return 1
+  fi
   local logo_path
   logo_path=$(find_logo "$company" "$slug")
 
   echo "[$company] Uploading sources..." >&2
   local logo_src="" pitch_src=""
   if [ -n "$logo_path" ] && [ -f "$logo_path" ]; then
-    logo_src=$(notebooklm source add "$logo_path" --title "${company} logo" -n "$NB_ID" --json | jq -r .source.id)
-    notebooklm source wait "$logo_src" -n "$NB_ID" --timeout 180
+    logo_src=$(notebooklm source add "$logo_path" --title "${company} logo" -n "$NB_ID" --json | jq -er .source.id) || {
+      echo "[$company] ERROR: logo upload failed" >&2
+      return 1
+    }
+    notebooklm source wait "$logo_src" -n "$NB_ID" --timeout 180 || {
+      echo "[$company] ERROR: logo source $logo_src not ready" >&2
+      return 1
+    }
   fi
-  pitch_src=$(notebooklm source add "$pitch_path" --title "${company} pitch description" -n "$NB_ID" --json | jq -r .source.id)
-  notebooklm source wait "$pitch_src" -n "$NB_ID" --timeout 180
+  pitch_src=$(notebooklm source add "$pitch_path" --title "${company} pitch description" -n "$NB_ID" --json | jq -er .source.id) || {
+    echo "[$company] ERROR: pitch upload failed" >&2
+    return 1
+  }
+  notebooklm source wait "$pitch_src" -n "$NB_ID" --timeout 180 || {
+    echo "[$company] ERROR: pitch source $pitch_src not ready" >&2
+    return 1
+  }
 
   local src_ids=("$pitch_src")
   if [ -n "$logo_src" ]; then
@@ -222,6 +249,8 @@ run_one_deck() {
     echo "[$company] ERROR: no task/artifact ID in generate output (exit $gen_status)" >&2
     return 1
   fi
+  # The ID is scraped from free text; log it so a wrong pick is easy to spot.
+  echo "[$company] Using artifact ID $task_id (first unknown UUID in generate output)" >&2
 
   if [ "$gen_status" -ne 0 ] || printf '%s\n' "$gen_out" | grep -qE "timed out|in_progress"; then
     echo "[$company] Waiting for artifact $task_id to complete..." >&2
@@ -232,13 +261,25 @@ run_one_deck() {
   fi
 
   echo "[$company] Downloading PDF (artifact $task_id)..." >&2
-  notebooklm download slide-deck "$pdf_raw" -n "$NB_ID" -a "$task_id" --force >&2
+  notebooklm download slide-deck "$pdf_raw" -n "$NB_ID" -a "$task_id" --force >&2 || {
+    echo "[$company] ERROR: download of artifact $task_id failed" >&2
+    return 1
+  }
+  require_nonempty_file "$company" "$pdf_raw" || return 1
 
   echo "[$company] Removing watermark..." >&2
-  bash "$SKILL_DIR/scripts/remove_watermark.sh" "$pdf_raw" "$pdf_clean" >&2
+  bash "$SKILL_DIR/scripts/remove_watermark.sh" "$pdf_raw" "$pdf_clean" >&2 || {
+    echo "[$company] ERROR: watermark removal failed" >&2
+    return 1
+  }
+  require_nonempty_file "$company" "$pdf_clean" || return 1
 
   echo "[$company] Flattening for Canva..." >&2
-  bash "$SKILL_DIR/scripts/flatten_pdf_for_canva.sh" "$pdf_clean" "$pdf_flat" >&2
+  bash "$SKILL_DIR/scripts/flatten_pdf_for_canva.sh" "$pdf_clean" "$pdf_flat" >&2 || {
+    echo "[$company] ERROR: Canva flattening failed" >&2
+    return 1
+  }
+  require_nonempty_file "$company" "$pdf_flat" || return 1
 
   echo "[$company] Done: $pdf_clean" >&2
   echo "$pdf_clean"

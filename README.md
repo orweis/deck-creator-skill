@@ -4,7 +4,7 @@ Automation for building buyer-specific pitch decks with **NotebookLM** (generati
 
 The workflow is defined as agent skills under [`.agents/skills/`](.agents/skills/) (Cursor or any agent that can run shell commands and call MCP tools).
 
-> **Upgrading from 1.x?** Version 2.0.0 moves User-Clone-GPT from the retired OpenAI Assistants API to the Responses API. `OPENAI_ASSISTANT_ID` is no longer used. See [Migrating from 1.x](CHANGELOG.md#migrating-from-1x).
+> **Upgrading from 1.x?** Version 2.0.0 moves User-Clone-GPT from the retired OpenAI Assistants API to the Responses API. `OPENAI_ASSISTANT_ID` is no longer used, `.env` is only read from the project root (set `OPENAI_ENV_FILE` for relocated installs), and `setup.sh` now pins the watermark remover and refuses to overwrite local edits. See [Migrating from 1.x](CHANGELOG.md#migrating-from-1x).
 
 ## Prerequisites
 
@@ -165,7 +165,7 @@ COMPANIES_FILE=companies.txt bash scripts/run_batch_decks.sh
 
 - Keep secrets in `.env` only. The CLI reads the project's `.env` (never a parent directory's) and will not send `.env`/key files as prompts.
 - `setup.sh` runs third-party code (the watermark remover and its Python dependencies). Both it and `notebooklm-py` are pinned; review upstream before changing the pins.
-- Buyer research goes to OpenAI and decks go to NotebookLM. The Canva import needs a **public** URL: anyone with the link can read the deck until it expires. The agent asks first; prefer a private signed URL you control, or import into Canva manually.
+- Buyer research goes to OpenAI and decks go to NotebookLM. User-Clone-GPT runs in OpenAI's background mode, which requires `store: true`, so prompts and responses are stored server-side by OpenAI under your account's retention settings. The Canva import needs a **public** URL: anyone with the link can read the deck until it expires. The agent asks first; prefer a private signed URL you control, or import into Canva manually.
 
 See [SECURITY.md](SECURITY.md) for details and how to report a vulnerability.
 

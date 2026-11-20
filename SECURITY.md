@@ -23,7 +23,9 @@ Be aware of the following when running the skills and scripts:
   version ranges.
 - **Browser credentials.** `notebooklm login` stores Google session cookies
   locally (managed by `notebooklm-py`).
-- **Data sent to third parties.** Buyer research prompts go to OpenAI; sources
+- **Data sent to third parties.** Buyer research prompts go to OpenAI
+  (background mode requires `store: true`, so OpenAI stores prompts and
+  responses server-side under your account's retention settings); sources
   and decks go to Google NotebookLM; the optional Canva import requires a
   **public** URL for the PDF. The pitch-deck skill asks for explicit consent
   before uploading a deck to a public temporary host, because anyone with the

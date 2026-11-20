@@ -25,6 +25,7 @@ for the migration steps.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -325,7 +326,9 @@ class OpenAIClient:
                     continue
                 body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
                 raise OpenAIError(f"OpenAI API {exc.code}: {_summarize_error_body(body)}") from exc
-            except (urllib.error.URLError, TimeoutError) as exc:
+            except (OSError, http.client.HTTPException) as exc:
+                # URLError, TimeoutError, ConnectionResetError, IncompleteRead, ...
+                # raised while connecting or while reading the body.
                 if idempotent and attempt < self._max_retries:
                     self._sleep(self._retry_delay(attempt, None))
                     attempt += 1
@@ -433,7 +436,9 @@ def ask(
     response = client.request("POST", "/responses", body)
     try:
         response = wait_for_response(client, response, timeout_sec=timeout_sec, sleep=sleep, clock=clock)
-    except TimeoutError:
+    except (TimeoutError, OpenAIError):
+        # Timed out, or polling failed permanently: stop the background run so
+        # it does not keep consuming tokens.
         cancel_response(client, str(response.get("id", "")))
         raise
     return extract_output_text(response), str(response.get("id", ""))
