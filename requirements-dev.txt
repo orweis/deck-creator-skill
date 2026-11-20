@@ -1,0 +1,7 @@
+# Development / CI dependencies. Runtime scripts use only the Python standard
+# library (flatten_pdf_pages.py also needs PyMuPDF, installed by setup.sh).
+pytest==9.2.0
+ruff==0.17.6
+shellcheck-py==0.11.0.1
+pymupdf==2.1; python_version >= "3.11"
+pymupdf==1.28.2; python_version < "3.11"
