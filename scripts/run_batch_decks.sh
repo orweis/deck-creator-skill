@@ -1,18 +1,34 @@
 #!/usr/bin/env bash
 # Batch pitch decks for multiple buyers via NotebookLM + User-Clone-GPT.
 #
-# Configure:
-#   COMPANIES array — "Display Name|extra context for User-Clone-GPT"
-#   SHARED_SRC_IDS array — NotebookLM source IDs for shared brand/product assets
-#   NB_NAME — NotebookLM notebook title (default: Pitch Decks)
+# Configure (edit below or use the environment):
+#   COMPANIES            array of "Display Name|extra context for User-Clone-GPT"
+#   COMPANIES_FILE       optional file with one "Display Name|context" per line
+#                        (blank lines and lines starting with # are ignored);
+#                        when set it replaces the COMPANIES array
+#   SHARED_SRC_IDS       array of NotebookLM source IDs for shared brand/product assets
+#   NB_NAME              NotebookLM notebook title (default: Pitch Decks)
+#   OUTPUT_DIR           where PDFs and layouts go (default: <repo>/output)
+#   WORK_ROOT            per-company working files, created private (mode 700)
+#                        (default: <OUTPUT_DIR>/work)
+#   BATCH_SLEEP_SEC      pause between companies (default: 60)
+#   BATCH_FAIL_SLEEP_SEC extra pause after a failure (default: 300)
+#   FORCE_DECK=1         regenerate decks even if a cleaned PDF exists
+#   FORCE_USER_CLONE_GPT=1  regenerate layouts even if one exists
+#
+# Logos: put a file at "$WORK_ROOT/<slug>/<slug>_logo.png" to have it uploaded.
+#
+# Requires: notebooklm (see setup.sh), jq, python3.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILL_DIR="$ROOT/.agents/skills/pitch-deck-generator"
 USER_CLONE_GPT_SKILL_DIR="$ROOT/.agents/skills/user-clone-gpt"
 NB_NAME="${NB_NAME:-Pitch Decks}"
-OUTPUT_DIR="$ROOT/output"
-mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/output}"
+WORK_ROOT="${WORK_ROOT:-$OUTPUT_DIR/work}"
+BATCH_SLEEP_SEC="${BATCH_SLEEP_SEC:-60}"
+BATCH_FAIL_SLEEP_SEC="${BATCH_FAIL_SLEEP_SEC:-300}"
 
 # Companies: "Display Name|extra context for User-Clone-GPT"
 COMPANIES=(
@@ -26,32 +42,64 @@ SHARED_SRC_IDS=(
   # "source-id-2"   # company logo
 )
 
-NB_ID=$(notebooklm list --json \
-  | jq -r --arg t "$NB_NAME" '.notebooks[] | select(.title == $t) | .id' \
-  | head -n1)
-if [ -z "$NB_ID" ]; then
-  echo "Notebook '$NB_NAME' not found" >&2
-  exit 1
-fi
+UUID_RE='[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
+
+# Lowercase, spaces -> underscores, keep only [a-z0-9_-]. Never empty.
+slugify() {
+  local slug
+  slug=$(printf '%s' "$1" | tr '[:upper:] ' '[:lower:]_' | LC_ALL=C tr -cd 'a-z0-9_-')
+  if [ -z "$slug" ]; then
+    slug="company_$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+  fi
+  printf '%s\n' "$slug"
+}
+
+# Create (if needed) a private per-company working directory and print it.
+work_dir_for() {
+  local dir="$WORK_ROOT/$1"
+  (umask 077 && mkdir -p "$dir")
+  chmod 700 "$WORK_ROOT" "$dir"
+  printf '%s\n' "$dir"
+}
+
+load_companies_file() {
+  local file="$1" line
+  [ -f "$file" ] || { echo "COMPANIES_FILE not found: $file" >&2; return 1; }
+  COMPANIES=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    COMPANIES+=("$line")
+  done < "$file"
+}
+
+require_tools() {
+  local tool missing=0
+  for tool in "$@"; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "Required tool not found on PATH: $tool" >&2
+      missing=1
+    fi
+  done
+  return "$missing"
+}
 
 generate_user_clone_gpt_layout() {
   local company="$1"
   local extra_context="$2"
-  local slug
-  slug=$(echo "$company" | tr '[:upper:] ' '[:lower:]_' | tr -cd '[:alnum:]_-')
-  local work_dir="/tmp/pitch-deck/${slug}"
+  local slug work_dir
+  slug=$(slugify "$company")
+  work_dir=$(work_dir_for "$slug")
   local pitch_path="$work_dir/${slug}_pitch.md"
   local prompt_path="$work_dir/${slug}_user_clone_gpt_prompt.md"
   local layout_out="$OUTPUT_DIR/${slug}_user_clone_gpt_deck_layout.md"
-  mkdir -p "$work_dir"
 
   if [ -f "$layout_out" ] && [ "${FORCE_USER_CLONE_GPT:-0}" != "1" ]; then
     echo "[$company] User-Clone-GPT layout exists: $layout_out" >&2
-    echo "$pitch_path"
-    return 0
-  fi
-
-  cat > "$prompt_path" <<EOF
+  else
+    # Unquoted delimiter: ${company}/${extra_context} are expanded once; their
+    # contents are inserted literally (command substitutions inside the values
+    # are NOT executed).
+    cat > "$prompt_path" <<EOF
 Write in the voice and style configured for this assistant.
 
 **Content type:** buyer research + pitch deck layout
@@ -78,34 +126,35 @@ ${extra_context}
 Output **only** the deck layout section (part 2) as the main body. You may include a short \`## Buyer context\` block (≤8 bullets) at the top if it helps the slide narrative.
 EOF
 
-  echo "[$company] Generating User-Clone-GPT layout..." >&2
-  python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" --ensure-model-only >&2
-  python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" "$prompt_path" \
-    -o "$layout_out" \
-    --timeout 600 >&2
+    echo "[$company] Generating User-Clone-GPT layout..." >&2
+    python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" \
+      --prompt-file "$prompt_path" \
+      -o "$layout_out" \
+      --timeout 600 >&2
+  fi
 
-  cat > "$pitch_path" <<PITCHEOF
-# ${company} — buyer pitch description
-
-$(cat "$layout_out")
-PITCHEOF
+  # Always (re)build the pitch file so a cached layout still yields a source.
+  {
+    printf '# %s — buyer pitch description\n\n' "$company"
+    cat "$layout_out"
+  } > "$pitch_path"
 
   echo "$pitch_path"
 }
 
+# Print the path of a pre-supplied logo for this company, or nothing.
 find_logo() {
   local company="$1"
   local slug="$2"
-  local work_dir="/tmp/pitch-deck/${slug}"
-  local logo_path="$work_dir/${slug}_logo.png"
-  mkdir -p "$work_dir"
-
-  if [ -f "$logo_path" ] && [ "${FORCE_LOGO:-0}" != "1" ]; then
-    echo "$logo_path"
-    return 0
-  fi
-
-  echo "WARN: No logo for $company — add LOGO_URL lookup or supply manually" >&2
+  local work_dir ext
+  work_dir=$(work_dir_for "$slug")
+  for ext in png jpg jpeg; do
+    if [ -f "$work_dir/${slug}_logo.$ext" ]; then
+      echo "$work_dir/${slug}_logo.$ext"
+      return 0
+    fi
+  done
+  echo "WARN: No logo for $company — place one at $work_dir/${slug}_logo.png" >&2
   echo ""
 }
 
@@ -113,7 +162,7 @@ run_one_deck() {
   local company="$1"
   local extra_context="$2"
   local slug
-  slug=$(echo "$company" | tr '[:upper:] ' '[:lower:]_' | tr -cd '[:alnum:]_-')
+  slug=$(slugify "$company")
   local pdf_raw="$OUTPUT_DIR/${slug}_pitch.pdf"
   local pdf_clean="$OUTPUT_DIR/${slug}_pitch_cleaned.pdf"
   local pdf_flat="$OUTPUT_DIR/${slug}_pitch_canva_flat.pdf"
@@ -124,7 +173,7 @@ run_one_deck() {
     return 0
   fi
 
-  rm -f "$pdf_raw" "$pdf_clean" "$pdf_flat" 2>/dev/null || true
+  rm -f "$pdf_raw" "$pdf_clean" "$pdf_flat"
 
   local pitch_path
   pitch_path=$(generate_user_clone_gpt_layout "$company" "$extra_context")
@@ -141,8 +190,11 @@ run_one_deck() {
   notebooklm source wait "$pitch_src" -n "$NB_ID" --timeout 180
 
   local src_ids=("$pitch_src")
-  [ -n "$logo_src" ] && src_ids+=("$logo_src")
-  src_ids+=("${SHARED_SRC_IDS[@]}")
+  if [ -n "$logo_src" ]; then
+    src_ids+=("$logo_src")
+  fi
+  # Safe expansion of a possibly empty array under `set -u` on bash < 4.4.
+  src_ids+=(${SHARED_SRC_IDS[@]+"${SHARED_SRC_IDS[@]}"})
 
   echo "[$company] Rendering prompt (${#src_ids[@]} sources)..." >&2
   local deck_prompt
@@ -151,25 +203,27 @@ run_one_deck() {
     --company "$company" \
     --deck-layout "$pitch_path") || { echo "[$company] render_prompt failed" >&2; return 1; }
 
-  local src_args=()
+  local src_args=() id
   for id in "${src_ids[@]}"; do src_args+=( -s "$id" ); done
 
   echo "[$company] Generating slide deck (may take several minutes)..." >&2
-  local gen_out task_id
+  local gen_out gen_status=0 task_id
+  # A --wait timeout exits non-zero but still prints the task ID, so capture
+  # the status instead of aborting and decide below.
   gen_out=$(notebooklm generate slide-deck "$deck_prompt" \
     -n "$NB_ID" \
     --format detailed \
     "${src_args[@]}" \
-    --wait --retry 2 2>&1) || true
+    --wait --retry 2 2>&1) || gen_status=$?
   echo "$gen_out" >&2
 
-  task_id=$(echo "$gen_out" | grep -oE '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' | head -1)
+  task_id=$(printf '%s\n' "$gen_out" | grep -oE "$UUID_RE" | grep -vxF -e "$NB_ID" "${src_ids[@]/#/-e}" | head -1 || true)
   if [ -z "$task_id" ]; then
-    echo "[$company] ERROR: no task/artifact ID in generate output" >&2
+    echo "[$company] ERROR: no task/artifact ID in generate output (exit $gen_status)" >&2
     return 1
   fi
 
-  if echo "$gen_out" | grep -qE "timed out|in_progress"; then
+  if [ "$gen_status" -ne 0 ] || printf '%s\n' "$gen_out" | grep -qE "timed out|in_progress"; then
     echo "[$company] Waiting for artifact $task_id to complete..." >&2
     notebooklm artifact wait "$task_id" -n "$NB_ID" --timeout 900 >&2 || {
       echo "[$company] ERROR: artifact $task_id did not complete" >&2
@@ -178,41 +232,72 @@ run_one_deck() {
   fi
 
   echo "[$company] Downloading PDF (artifact $task_id)..." >&2
-  notebooklm download slide-deck "$pdf_raw" -n "$NB_ID" -a "$task_id" --force
+  notebooklm download slide-deck "$pdf_raw" -n "$NB_ID" -a "$task_id" --force >&2
 
   echo "[$company] Removing watermark..." >&2
-  bash "$SKILL_DIR/scripts/remove_watermark.sh" "$pdf_raw" "$pdf_clean"
+  bash "$SKILL_DIR/scripts/remove_watermark.sh" "$pdf_raw" "$pdf_clean" >&2
 
   echo "[$company] Flattening for Canva..." >&2
-  bash "$SKILL_DIR/scripts/flatten_pdf_for_canva.sh" "$pdf_clean" "$pdf_flat"
+  bash "$SKILL_DIR/scripts/flatten_pdf_for_canva.sh" "$pdf_clean" "$pdf_flat" >&2
 
   echo "[$company] Done: $pdf_clean" >&2
   echo "$pdf_clean"
 }
 
-python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" --ensure-model-only
+main() {
+  require_tools notebooklm jq python3
+  mkdir -p "$OUTPUT_DIR"
 
-echo "Shared brand sources: ${#SHARED_SRC_IDS[@]}"
-echo "Processing ${#COMPANIES[@]} companies..."
-
-RESULTS_FILE="$OUTPUT_DIR/batch_decks_results.txt"
-: > "$RESULTS_FILE"
-
-for entry in "${COMPANIES[@]}"; do
-  company="${entry%%|*}"
-  context="${entry#*|}"
-  echo "" >&2
-  echo "========== $company ==========" >&2
-  if pdf=$(run_one_deck "$company" "$context"); then
-    echo "$company|$pdf" >> "$RESULTS_FILE"
-  else
-    echo "$company|FAILED" >> "$RESULTS_FILE"
-    echo "[$company] FAILED — continuing with next company"
-    sleep 300
+  if [ -n "${COMPANIES_FILE:-}" ]; then
+    load_companies_file "$COMPANIES_FILE"
   fi
-  sleep 60
-done
+  if [ "${#COMPANIES[@]}" -eq 0 ]; then
+    echo "No companies configured." >&2
+    exit 1
+  fi
 
-echo ""
-echo "All done. Results: $RESULTS_FILE"
-cat "$RESULTS_FILE"
+  NB_ID=$(notebooklm list --json \
+    | jq -r --arg t "$NB_NAME" '.notebooks[] | select(.title == $t) | .id' \
+    | head -n1)
+  if [ -z "$NB_ID" ]; then
+    echo "Notebook '$NB_NAME' not found" >&2
+    exit 1
+  fi
+
+  # Fail fast on missing/invalid User-Clone-GPT configuration.
+  python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" --ensure-model-only
+
+  echo "Shared brand sources: ${#SHARED_SRC_IDS[@]}"
+  echo "Processing ${#COMPANIES[@]} companies..."
+
+  local results_file="$OUTPUT_DIR/batch_decks_results.txt"
+  : > "$results_file"
+
+  local entry company context pdf
+  for entry in "${COMPANIES[@]}"; do
+    company="${entry%%|*}"
+    if [[ "$entry" == *"|"* ]]; then
+      context="${entry#*|}"
+    else
+      context=""
+    fi
+    echo "" >&2
+    echo "========== $company ==========" >&2
+    if pdf=$(run_one_deck "$company" "$context"); then
+      echo "$company|$pdf" >> "$results_file"
+    else
+      echo "$company|FAILED" >> "$results_file"
+      echo "[$company] FAILED — continuing with next company"
+      sleep "$BATCH_FAIL_SLEEP_SEC"
+    fi
+    sleep "$BATCH_SLEEP_SEC"
+  done
+
+  echo ""
+  echo "All done. Results: $results_file"
+  cat "$results_file"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
