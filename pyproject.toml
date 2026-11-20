@@ -1,0 +1,22 @@
+# Tooling configuration only (pytest, ruff). This repository is a set of agent
+# skills and scripts, not an installable Python package. The release version
+# lives in VERSION; dev dependencies are in requirements-dev.txt.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "shell: tests that run bash scripts",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I", "S"]
+ignore = [
+  "UP006", "UP007", "UP035", "UP045", # scripts keep `from __future__ import annotations` style
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603", "S607", "S108"]

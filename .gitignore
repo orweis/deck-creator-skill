@@ -1,7 +1,22 @@
+# OS / editor
 .DS_Store
+
+# Python
 __pycache__/
 *.py[cod]
-.env
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets: never commit real env files (the template is fine)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated decks, layouts and working files
 output/
