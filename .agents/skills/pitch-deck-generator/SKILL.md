@@ -1,13 +1,13 @@
 ---
 name: pitch-deck-generator
-description: Generates a buyer-specific pitch deck via Google NotebookLM. Use when the user asks to "create a pitch deck for <Company>", "build a pitch for <Company>", "generate a buyer pitch", or otherwise wants a tailored sales deck for a target company. When no deck layout is provided, uses the user-clone-gpt skill (User-Clone-GPT / ask_user_clone_gpt.py) to research the buyer and produce a slide layout first. Resolves a NotebookLM notebook by name (default "Pitch Decks"), downloads the target company's logo from the web, uploads the logo and pitch description as sources, selects only the relevant sources (ignoring other companies' prior pitches), renders the bundled deck-prompt-template with the company name and deck layout, generates the slide deck, downloads it as PDF, removes the NotebookLM watermark, raster-merges each page (single flat image per slide) for stable Canva imports, and by default imports that flattened PDF into Canva via MCP and converts it to a native Presentation for presenter mode (skippable).
+description: Generates a buyer-specific pitch deck via Google NotebookLM. Use when the user asks to "create a pitch deck for <Company>", "build a pitch for <Company>", "generate a buyer pitch", or otherwise wants a tailored sales deck for a target company. When no deck layout is provided, uses the user-clone-gpt skill (User-Clone-GPT / ask_user_clone_gpt.py) to research the buyer and produce a slide layout first. Resolves a NotebookLM notebook by name (default "Pitch Decks"), downloads the target company's logo from the web, uploads the logo and pitch description as sources, selects only the relevant sources (ignoring other companies' prior pitches), renders the bundled deck-prompt-template with the company name and deck layout, generates the slide deck, downloads it as PDF, removes the NotebookLM watermark, raster-merges each page (single flat image per slide) for stable Canva imports, and by default (after the user consents to a temporary public upload) imports that flattened PDF into Canva via MCP and converts it to a native Presentation for presenter mode (skippable).
 ---
 
 # Pitch Deck Generator (NotebookLM)
 
-End-to-end automation for producing a buyer-specific pitch deck. Drives [`teng-lin/notebooklm-py`](https://github.com/teng-lin/notebooklm-py) for the slide-deck generation, and [`Albonire/notebooklm-watermark-remover`](https://github.com/Albonire/notebooklm-watermark-remover) (branch `bibi`) for cleanup.
+End-to-end automation for producing a buyer-specific pitch deck. Drives [`teng-lin/notebooklm-py`](https://github.com/teng-lin/notebooklm-py) for the slide-deck generation, and [`Albonire/notebooklm-watermark-remover`](https://github.com/Albonire/notebooklm-watermark-remover) (pinned to a reviewed commit of branch `bibi` by `setup.sh`) for cleanup.
 
-After the cleaned PDF exists, **raster-merge each page** (see Step 10) so the inpaint patch is no longer a separate vector layer—then **by default** push that **flattened** PDF into **Canva** using the **Canva MCP**: import from a short-lived public HTTPS URL, then **resize** the imported design to the **`presentation`** preset so each page behaves as a proper slide in **Canva presenter mode**. Skip this block only when the user opts out, the Canva MCP is unavailable, or public upload fails after reasonable retries.
+After the cleaned PDF exists, **raster-merge each page** (see Step 10) so the inpaint patch is no longer a separate vector layer—then **by default** push that **flattened** PDF into **Canva** using the **Canva MCP**: **after the user explicitly agrees** to a short-lived public HTTPS upload (Step 11), import from that URL, then **resize** the imported design to the **`presentation`** preset so each page behaves as a proper slide in **Canva presenter mode**. Skip this block when the user opts out or declines the public upload, the Canva MCP is unavailable, or public upload fails after reasonable retries.
 
 ## Inputs to gather from the user
 
@@ -28,7 +28,7 @@ bash "$SKILL_DIR/scripts/setup.sh"
 notebooklm login   # only if `notebooklm status` is not authenticated yet
 ```
 
-This installs `notebooklm-py` (CLI + Python lib) via pip and clones the watermark remover into `~/.local/share/notebooklm-watermark-remover/` with its own venv.
+This installs a pinned `notebooklm-py` (CLI + Python lib) via uv/pipx/pip and checks out the watermark remover at a pinned commit into `~/.local/share/notebooklm-watermark-remover/` with its own venv (plus PyMuPDF for flattening). It runs third-party code; see the project `SECURITY.md`. Requires `jq` for the commands below.
 
 Verify the toolchain works before running the workflow:
 
@@ -54,7 +54,7 @@ Copy this checklist and tick items off as you go:
 - [ ] 8. Download the deck as PDF
 - [ ] 9. Remove the watermark
 - [ ] 10. Raster-merge cleaned PDF (one flat image per page) for Canva
-- [ ] 11. (Default) Upload flattened PDF to a temporary public HTTPS URL; import into Canva (`import-design-from-url`) — if **`Not connected`**, ask user to toggle **Canva** MCP off/on (Step 11 subsection), then retry
+- [ ] 11. (Default) **Ask the user to confirm** a temporary public upload, then upload flattened PDF to a public HTTPS URL; import into Canva (`import-design-from-url`) — if **`Not connected`**, ask user to toggle **Canva** MCP off/on (Step 11 subsection), then retry
 - [ ] 12. (Default) Resize imported design to Presentation preset in Canva (`resize-design`) for presenter mode
 - [ ] 13. Report paths (`*_pitch_cleaned.pdf`, `*_pitch_canva_flat.pdf`), NotebookLM sources, and Canva design IDs / edit URLs (import vs presentation)
 ```
@@ -69,11 +69,13 @@ Always pass `-n "$NB_ID"` / `--notebook "$NB_ID"` explicitly (don't rely on `not
 SKILL_DIR="<absolute path to .agents/skills/pitch-deck-generator>"
 USER_CLONE_GPT_SKILL_DIR="<absolute path to .agents/skills/user-clone-gpt>"
 COMPANY="Acme Corp"                # from user input
-COMPANY_SLUG=$(echo "$COMPANY" | tr '[:upper:] ' '[:lower:]_' | tr -cd '[:alnum:]_-')
+COMPANY_SLUG=$(printf '%s' "$COMPANY" | tr '[:upper:] ' '[:lower:]_' | LC_ALL=C tr -cd 'a-z0-9_-')
+[ -n "$COMPANY_SLUG" ] || COMPANY_SLUG="company_$(printf '%s' "$COMPANY" | cksum | cut -d' ' -f1)"
 NB_NAME="${NB_NAME:-Pitch Decks}"
-WORK_DIR="/tmp/pitch-deck/${COMPANY_SLUG}"
+# Private per-run working directory (not a shared, predictable /tmp path).
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/pitch-deck-${COMPANY_SLUG}.XXXXXX")
 PITCH_PATH="$WORK_DIR/${COMPANY_SLUG}_pitch.md"   # user file, or User-Clone-GPT output (Step 2.5)
-mkdir -p "$WORK_DIR" ./output
+mkdir -p ./output
 ```
 
 ### Step 1: Resolve notebook ID
@@ -97,15 +99,17 @@ If not found, ask the user whether to create it (`notebooklm create "$NB_NAME"`)
 Use your web tools (web search + fetch) to locate the logo:
 
 1. Search for `"{COMPANY} official logo PNG transparent"` (and/or `site:{company-domain} logo`).
-2. Prefer a direct image URL (`.png`, `.svg`, `.jpg`) with a transparent background, ideally from the company's own brand/press page. Skip search result pages and CDN-blocked URLs.
-3. Verify the candidate URL is actually an image before downloading:
+2. Prefer a direct **HTTPS** raster image URL (`.png`, `.jpg`) with a transparent background, ideally from the company's own brand/press page. Skip search result pages and CDN-blocked URLs.
+3. Download with HTTPS-only, size- and time-limited settings, then verify it is a raster image (SVG can carry scripts; convert it to PNG first if it is the only option):
 
 ```bash
 LOGO_URL="<resolved direct image url>"
 LOGO_PATH="$WORK_DIR/${COMPANY_SLUG}_logo.png"
 
-curl -fsSL -A "Mozilla/5.0" "$LOGO_URL" -o "$LOGO_PATH"
-file "$LOGO_PATH" | grep -Eiq 'image|svg' || { echo "Not an image: $LOGO_URL"; rm -f "$LOGO_PATH"; exit 1; }
+case "$LOGO_URL" in https://*) ;; *) echo "Refusing non-HTTPS logo URL: $LOGO_URL"; exit 1 ;; esac
+curl -fsSL --proto '=https' --proto-redir '=https' --max-filesize 5242880 --max-time 30 \
+  -A "Mozilla/5.0" "$LOGO_URL" -o "$LOGO_PATH"
+file "$LOGO_PATH" | grep -Eiq 'PNG image|JPEG image' || { echo "Not a PNG/JPEG image: $LOGO_URL"; rm -f "$LOGO_PATH"; exit 1; }
 ```
 
 If the first URL fails or returns HTML, try the next candidate. If nothing works, ask the user to supply a logo URL or a local file path.
@@ -114,7 +118,7 @@ If the first URL fails or returns HTML, try the next candidate. If nothing works
 
 **Skip this step** when the user already supplied a deck layout (inline or file path). Otherwise, follow the **user-clone-gpt** skill to research the buyer and produce a slide layout before NotebookLM generation.
 
-Requires `OPENAI_API_KEY` and `OPENAI_ASSISTANT_ID` in project root `.env` (see user-clone-gpt skill).
+Requires `OPENAI_API_KEY` plus a voice configuration (`OPENAI_INSTRUCTIONS_FILE`, `OPENAI_VECTOR_STORE_IDS` and/or `OPENAI_PROMPT_ID`) in the project root `.env` (see the user-clone-gpt skill).
 
 ```bash
 USER_CLONE_GPT_PROMPT="$WORK_DIR/${COMPANY_SLUG}_user_clone_gpt_prompt.md"
@@ -145,8 +149,9 @@ Write in the voice and style configured for this assistant.
 Output **only** the deck layout section (part 2) as the main body. You may include a short \`## Buyer context\` block (≤8 bullets) at the top if it helps the slide narrative.
 EOF
 
-python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" --ensure-model-only
-python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" "$USER_CLONE_GPT_PROMPT" \
+python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" --info   # config check, no API call
+python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" \
+  --prompt-file "$USER_CLONE_GPT_PROMPT" \
   -o "$USER_CLONE_GPT_OUT" \
   --timeout 600
 
@@ -158,12 +163,12 @@ $(cat "$USER_CLONE_GPT_OUT")
 EOF
 ```
 
-Review User-Clone-GPT output (claims, no fabricated proof points). If a slide is weak or generic, refine on the same thread:
+Review User-Clone-GPT output (claims, no fabricated proof points). If a slide is weak or generic, refine with a follow-up using the `[response_id=...]` printed by the previous run:
 
 ```bash
 python3 "$USER_CLONE_GPT_SKILL_DIR/scripts/ask_user_clone_gpt.py" \
   "Tighten slides 2–4 for ${COMPANY}'s stack; keep 3–5 bullets per slide." \
-  --thread-id thread_... \
+  --previous-response-id resp_... \
   -o "$USER_CLONE_GPT_OUT"
 # Re-copy into PITCH_PATH if updated
 ```
@@ -236,7 +241,7 @@ DECK_PROMPT=$(python3 "$SKILL_DIR/scripts/render_prompt.py" \
   --deck-layout "$PITCH_PATH")
 ```
 
-The template is the source of truth for deck style — edit `deck-prompt-template.md` to evolve it across all future pitches. Unsubstituted `<...>` placeholders will cause the renderer to exit non-zero so the agent can't silently ship a half-rendered prompt.
+The template is the source of truth for deck style (the top-level `deck-prompt-template.md` is a mirror kept for compatibility; edit the skill copy) — edit `deck-prompt-template.md` to evolve it across all future pitches. Unsubstituted `<...>` placeholders (anywhere in the rendered text, including the layout) cause the renderer to exit 2 so the agent can't silently ship a half-rendered prompt. An empty company name or layout is also rejected.
 
 ### Step 7: Generate the slide deck
 
@@ -263,6 +268,8 @@ notebooklm artifact poll "<TASK_ID>" -n "$NB_ID"
 When **`status`** becomes **`completed`**, download with **`notebooklm download slide-deck ... -a "<ARTIFACT_ID>"`** using the task/artifact ID from the generate output. **Never use `--latest`** in batch runs — it downloads the wrong deck when multiple pitches share a notebook.
 
 ```bash
+# gen_out holds the combined output of the generate command, e.g. gen_out=$(notebooklm generate ... 2>&1)
+# Make sure the ID you pick is not the notebook or a source ID.
 task_id=$(echo "$gen_out" | grep -oE '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' | head -1)
 notebooklm artifact wait "$task_id" -n "$NB_ID" --timeout 900
 notebooklm download slide-deck "$PDF_RAW" -n "$NB_ID" -a "$task_id" --force
@@ -299,7 +306,14 @@ Keep **`PDF_CLEAN`** as the editable intermediate (still vector-ish except for t
 
 ### Step 11: (Default) Public URL + Canva import
 
-The Canva MCP's `import-design-from-url` tool accepts **only** a **public `https://` URL**, not local paths. Upload **`PDF_CANVA_FLAT`** (not `PDF_CLEAN`) to a **temporary** host, verify the link returns **`application/pdf`** (not an HTML landing page), then call the MCP tool.
+The Canva MCP's `import-design-from-url` tool accepts **only** a **public `https://` URL**, not local paths.
+
+**Privacy gate (required):** the deck contains buyer-specific sales strategy. Uploading it to a public temporary host means a third party stores it and **anyone with the link can download it until it expires**. Before uploading, tell the user this and **ask for explicit confirmation**. Offer the alternatives:
+
+- a private, short-lived **signed URL** from storage the user controls (e.g. an S3/GCS presigned URL), or
+- skipping the upload and importing manually in Canva (**Create a design → Import file**), i.e. `SKIP_CANVA=1`.
+
+Only if the user agrees to a public host: upload **`PDF_CANVA_FLAT`** (not `PDF_CLEAN`), verify the link returns **`application/pdf`** (not an HTML landing page), then call the MCP tool.
 
 Example pattern (hosts vary; pick one that returns a direct PDF over HTTPS):
 
@@ -341,7 +355,7 @@ If Canva import fails with **`Not connected`**, **`error`**, auth errors, or the
 **Agent after user toggles**
 
 1. If the failure looked like **auth** (401, unauthorized, token expired), call **`mcp_auth`** for **`user-Canva`** once, then retry.
-2. Re-upload **`PDF_CANVA_FLAT`** to a fresh public HTTPS URL (temp hosts expire).
+2. Re-upload **`PDF_CANVA_FLAT`** to a fresh HTTPS URL (temp hosts expire), within the consent the user already gave.
 3. Retry **`import-design-from-url`** → **`resize-design`** → **`get-design`**.
 4. If it still fails after one toggle + retry, set **`SKIP_CANVA=1`**, deliver the PDF paths, and tell the user they can import manually in Canva (**Create a design → Import file**) or toggle again later.
 
@@ -388,9 +402,9 @@ When in doubt, ask the user to confirm the source list before generating.
 ## Files in this skill
 
 - `deck-prompt-template.md` — Pitch deck template. Edit to evolve the deck style across all future pitches.
-- `scripts/setup.sh` — One-time installer for `notebooklm-py` and the watermark remover.
+- `scripts/setup.sh` — One-time installer for a pinned `notebooklm-py` and the watermark remover at a pinned commit (`NOTEBOOKLM_PY_SPEC`, `NOTEBOOKLM_WM_REF`, `NOTEBOOKLM_WM_DIR` overrides).
 - `scripts/render_prompt.py` — Substitutes `<Company Name>` and `<Deck Layout>` in the template. Fails loudly on any leftover `<...>` placeholders.
-- `scripts/remove_watermark.sh` — Wrapper around `Albonire/notebooklm-watermark-remover` (clones into `~/.local/share/notebooklm-watermark-remover/`, runs in its venv).
+- `scripts/remove_watermark.sh` — Wrapper around `Albonire/notebooklm-watermark-remover` (installed by `setup.sh` into `~/.local/share/notebooklm-watermark-remover/`; runs in its venv). Usage: `remove_watermark.sh <input> [output] [-- <remover args>]`.
 - `scripts/flatten_pdf_pages.py` — Raster-merge every PDF page into one full-page bitmap in a new PDF (`insert_image` + `keep_proportion=False`).
 - `scripts/flatten_pdf_for_canva.sh` — Runs `flatten_pdf_pages.py` using the watermark-remover venv (PyMuPDF already installed there).
 
@@ -407,7 +421,7 @@ When in doubt, ask the user to confirm the source list before generating.
   Then retry `notebooklm login`. As a no-Playwright alternative, import cookies from an already-logged-in browser: `notebooklm login --browser-cookies chrome` (requires `notebooklm-py[cookies]`).
 - **Notebook not found** — `notebooklm list` to confirm exact title (case-sensitive).
 - **Slide-deck generation fails with rate limit** — wait 5–10 min, retry with `--retry 2`. Fall back to web UI if it keeps failing.
-- **Logo URL returns HTML instead of an image** — pick a direct `.png/.svg/.jpg` URL from the page source, or fall back to a different search result.
+- **Logo URL returns HTML instead of an image** — pick a direct HTTPS `.png`/`.jpg` URL from the page source, or fall back to a different search result.
 - **Logos show as placeholder text in slides** — avoid logos inline with copy (see `deck-prompt-template.md`); re-generate, or tighten logo placement wording for that buyer.
 - **Watermark not fully removed** — try `--margin-x 400 --margin-y 100` (see remover `--help`); or run the remover on the PPTX export instead (`download slide-deck --format pptx`).
 - **Watermark patch / overlay shifted in Canva (or after Presentation resize)** — import **`${COMPANY_SLUG}_pitch_canva_flat.pdf`** (Step 10) instead of `*_cleaned.pdf`: each slide is one raster, so there is no separate inpaint layer to move.
@@ -415,13 +429,13 @@ When in doubt, ask the user to confirm the source list before generating.
 - **Canva MCP missing / import fails / `Not connected`** — Ask the user to **toggle Canva off → on** in **Settings → Features → Model Context Protocol** (see **Canva MCP — connect / reconnect** under Step 11). Check **Output → MCP Logs** if it keeps failing. Retry import once after toggle; use **`mcp_auth`** for **`user-Canva`** on auth errors. Fallback: **`SKIP_CANVA=1`**, deliver `*_canva_flat.pdf`, or manual import in Canva UI.
 - **Public PDF URL returns HTML** — use the host's **direct download** URL (e.g. tmpfiles **`/dl/`** path); verify with `curl -sI` → `content-type: application/pdf`.
 - **`resize-design` fails** — report **`IMPORT_DESIGN_ID`** only; user can duplicate/convert inside Canva's UI.
-- **User-Clone-GPT fails / no layout generated** — confirm `OPENAI_API_KEY` and `OPENAI_ASSISTANT_ID` in `.env`; see **user-clone-gpt** troubleshooting. Fall back to asking the user for a deck layout only if the API is unavailable.
-- **Auto-generated layout too generic** — re-prompt on the same `--thread-id` with buyer-specific context from web research (Step 2 logo/domain hunt often surfaces useful product angles).
+- **User-Clone-GPT fails / no layout generated** — run `ask_user_clone_gpt.py --info` to check `.env` (`OPENAI_API_KEY` plus a voice configuration); see **user-clone-gpt** troubleshooting. Fall back to asking the user for a deck layout only if the API is unavailable.
+- **Auto-generated layout too generic** — re-prompt with `--previous-response-id` with buyer-specific context from web research (Step 2 logo/domain hunt often surfaces useful product angles).
 
 ## References
 
 - **user-clone-gpt** skill — `.agents/skills/user-clone-gpt/SKILL.md` (User-Clone-GPT / `ask_user_clone_gpt.py`)
 - NotebookLM CLI/Python — https://github.com/teng-lin/notebooklm-py
-- Watermark remover — https://github.com/Albonire/notebooklm-watermark-remover (default branch `bibi`)
+- Watermark remover — https://github.com/Albonire/notebooklm-watermark-remover (branch `bibi`, pinned by commit in `setup.sh`)
 - Canva MCP tools used here: `import-design-from-url`, `resize-design`, `get-design` (schemas under your Cursor MCP descriptors for **`user-Canva`**).
 - Canva Help — publish / domains: https://www.canva.com/help/publishing-canva-websites/
