@@ -203,4 +203,4 @@ The test suite never calls OpenAI, NotebookLM or Canva: HTTP is faked and extern
 
 ## License
 
-MIT — customize and redistribute as needed.
+Licensed under the [Apache License, Version 2.0](LICENSE).

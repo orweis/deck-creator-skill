@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [2.0.0] - 2026-11-20
 
+### License
+- The project is now licensed under the Apache License 2.0 (`LICENSE`).
+
 ### Breaking changes
 
 - **User-Clone-GPT now uses the OpenAI Responses API.** OpenAI shut down the
